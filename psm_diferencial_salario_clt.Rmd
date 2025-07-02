@@ -1,0 +1,443 @@
+---
+title: 'Prêmio da formalidade no Brasil: uma análise do diferencial salarial por meio
+  do Propensity Score Matching com dados PNAD Contínua de 2024.'
+author: "João V. S. Correia"
+output:
+  html_document:
+    df_print: paged
+---
+
+> DOI: [10.5281/zenodo.15787860](https://doi.org/10.5281/zenodo.15787860)
+
+
+
+# Objetivo
+
+O objetivo do estudo é de estimar o efeito de possuir contrato de trabalho com carteira assinada sobre o rendimento mensal dos trabalhadores no Brasil, utilizando os dados da PNAD Contínua de 2024 e o método de Propensity Score Matching (PSM). O estudo busca isolar o "prêmio salarial da formalidade" ao controlar o viés de seleção e as diferenças observáveis entre os grupos de trabalhadores com e sem carteira assinada.
+
+
+# Justificativa e motivação
+
+A alta taxa de informalidade é uma característica estrutural e persistente do mercado de trabalho brasileiro. Embora seja consenso que trabalhadores formais possuem maior acesso a benefícios e proteções, o verdadeiro impacto da formalidade sobre o salário é frequentemente debatido. Uma simples comparação de médias salariais é enganosa, pois trabalhadores que conseguem empregos formais podem já possuir características (observáveis e não observáveis) que os levariam a ter salários mais altos de qualquer maneira (viés de seleção).
+
+Este estudo se justifica por utilizar uma metodologia quase-experimental robusta, o Propensity Score Matching (PSM) e os microdados da PNAD Contínua, para criar um grupo de comparação mais adequado, permitindo uma estimativa mais precisa do prêmio salarial. Os resultados são de alta relevância para políticas públicas voltadas à formalização do trabalho e para o debate sobre a precarização das relações de emprego no cenário econômico.
+
+# Hipóteses
+
+A eficácia do método de pareamento (matching) em estimar o impacto causal de um programa ou política está condicionada a uma suposição fundamental: a atribuição do tratamento no grupo pareado deve se comportar como se fosse aleatória. Esta é a premissa central que sustenta a validade da abordagem.
+
+Conforme Imbens (2015) e Castro, Costa e Finamor (2024), as condições necessárias para aplicação do método são:
+
+**1. independência condicional:** os resultados potenciais $Y_i^1$ e $Y_i^0$ são estatisticamente independentes do tratamento $T_i$, condicional ao conjunto de variáveis $X_i$:
+
+$$ T_i \perp (Y_i^1, Y_i^0) | X_i $$
+
+**2. suporte comum:** o escore de propensão $p(x)$ respeita a condição $0 < p(X) < 1$
+
+Na hipótese 2, o escore de propensão é definido como a probabilidade de participação na
+política, assim:
+
+$$ p(x) = {E}[T_i \mid X_i = x] = \Pr(T_i = 1 \mid X_i = x) $$
+Para que a condição de suporte comum seja válida, nenhuma característica observável pode perfeitamente prever o acesso ao tratamento. Em outras palavras, não pode existir nenhum grupo com atributos que garantam sempre a participação (ou sempre a exclusão) do programa. Quando essa situação ocorre, os indivíduos desses grupos devem ser removidos da análise, o que limita a abrangência das conclusões obtidas.
+
+
+Sob essas duas hipóteses, o viés de seleção é igual a zero, já que:
+
+$$ E[Y_i^0|T_i = 1, X_i = x] = E[Y_i^0|T_i = 0, X_i = x] $$
+Dessa forma, a diferença observada nas médias do indicador de resultado entre os grupos de tratamento e de controle será igual ao impacto causal entre os tratados, condicional ao conjunto de características observáveis:
+
+$$
+E[Y_i \mid T_i = 1, X_i = x] - E[Y_i \mid T_i = 0, X_i = x] = E[Y_i^1 - Y_i^0 \mid T_i = 1, X_i = x]
+$$
+Finalmente, ao calcular o valor esperado da expressão anterior em relação às variáveis observadas X, obtemos a identificação do efeito médio do tratamento sobre os tratados **(ATT)**.
+
+
+$${E}_X \{ E[Y_i \mid T_i = 1, X_i = x] - E[Y_i \mid T_i = 0, X_i = x] \} = E[Y_i^1 - Y_i^0 \mid T_i = 1] \quad \Rightarrow \text{ATT}$$
+
+# Análise empírica
+
+## Carregando as bibliotecas necessárias
+
+```{r setup, include=TRUE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# limpar ambiente
+rm(list=ls())
+
+#Carregar pacotes necessários
+library(data.table)   # Para manipulação de dados
+library(knitr)        
+library(dplyr)        # Para manipulação de dados
+library(tidyr)        # Para manipulação de dados
+library(PNADcIBGE)    # Para carregar dados da PNAD Contínua
+library(tidyverse)    # Para manipulação de dados
+library(ggplot2)      # Para visualização de dados
+library(stargazer)    # Para gerar tabelas de regressão
+library(tidyverse)    # Para manipulação de base de dados
+library(broom)        # Para converter regressões em base de dados
+library(data.table)   # Para gerar data frames
+library(randomizr)    # Para randomização
+library(RCT)          # Para análise de ensaios clínicos randomizados
+library(xtable)       # Para gerar tabelas em LaTeX
+library(MatchIt)      # Pacote para matching
+library(cobalt)       # Para balanceamento de covariáveis
+library(lfe)          # Para regressões com efeitos fixos
+set.seed(2024) # Definindo uma semente para reprodutibilidade
+```
+
+
+## Leitura e processamento dos dados da PNAD Contínua 2024
+
+A biblitoeca pnadcIBGE permite baixar os dados da PNAD Contínua diretamente do site do IBGE. A seguir, são baixados os dados dos quatro trimestres de 2024 e combinados em uma única base de dados.
+
+```{r, warning=FALSE, message=FALSE}
+pnadc20241tri <- get_pnadc(year = 2024, quarter = 1, design = FALSE)
+pnadc20242tri <- get_pnadc(year = 2024, quarter = 2, design = FALSE)
+pnadc20243tri <- get_pnadc(year = 2024, quarter = 3, design = FALSE)
+pnadc20244tri <- get_pnadc(year = 2024, quarter = 4, design = FALSE)
+
+#Combinando os trimestres em uma única base de dados
+#pnadc2024 <- rbind(pnadc20241tri, pnadc20242tri, pnadc20243tri, pnadc20244tri) # O rbind() funciona bem desde que os data.frames tenham exatamente as mesmas colunas, na mesma ordem.
+
+pnadc2024 <- bind_rows(pnadc20241tri, pnadc20242tri, pnadc20243tri, pnadc20244tri) #bind_rows() alinha as colunas pelo nome, mesmo que a ordem seja diferente, e insere NA se alguma variável estiver ausente em um dos data frames.
+```
+
+
+```{r}
+#salvando a base
+#save(pnadc2024, file = "pnadc2024.RData")
+#setwd("C:/Users/joaov/Desktop/") # Definindo o diretório de trabalho
+#load("C:/Users/joaov/Desktop/pnadc2024.RData")
+```
+
+
+## Data wrangling
+
+Aqui é realizado o tratamento dos dados, incluindo a criação de variáveis necessárias para a análise, como o código do domicílio e da pessoa, além da conversão de variáveis categóricas em numéricas. Também são criadas variáveis binárias para regiões geográficas e outras características relevantes.
+
+```{r, warning=FALSE, message=FALSE}
+#Tratando os dados
+
+#table(pnadc2024c$ANOS_ESTUDO, useNA = "ifany") # dica --> para verificar a distribuição de uma variável 
+
+pnadc2024c = pnadc2024 %>%
+  mutate(
+    UPA = as.numeric(UPA), #
+    V1008 = as.numeric(V1008), #Número do domicílio
+    V1014 = as.numeric(V1014), #Grupo da amostra
+    V2003 = as.numeric(V2003),
+    CODIGO = UPA * 1000 + V1008 * 10 + V1014, # código do domicílio
+    CODPES = UPA *1000 + V1008 *100 + V1014 *10 + V2003, # código da pessoa
+    UF_char = as.character(UF),  # converte o fator em string
+    cod_uf = recode(UF_char,
+                    "Rondônia" = 11,
+                    "Acre" = 12,
+                    "Amazonas" = 13,
+                    "Roraima" = 14,
+                    "Pará" = 15,
+                    "Amapá" = 16,
+                    "Tocantins" = 17,
+                    "Maranhão" = 21,
+                    "Piauí" = 22,
+                    "Ceará" = 23,
+                    "Rio Grande do Norte" = 24,
+                    "Paraíba" = 25,
+                    "Pernambuco" = 26,
+                    "Alagoas" = 27,
+                    "Sergipe" = 28,
+                    "Bahia" = 29,
+                    "Minas Gerais" = 31,
+                    "Espírito Santo" = 32,
+                    "Rio de Janeiro" = 33,
+                    "São Paulo" = 35,
+                    "Paraná" = 41,
+                    "Santa Catarina" = 42,
+                    "Rio Grande do Sul" = 43,
+                    "Mato Grosso do Sul" = 50,
+                    "Mato Grosso" = 51,
+                    "Goiás" = 52,
+                    "Distrito Federal" = 53))%>%
+      rename(
+        CLT = V4029, # contrato CLT
+        RPM = V403412, # renda mensal
+        FAIXA_SM =  V403411, # faixa de salário mínimo
+        DIA_NASC = V2008, # dia de nascimento,
+        MES_NASC = V20081, # mês de nascimento
+        ANO_NASC = V20082, # ano de nascimento
+        OCUPADO = V4001, # ocupado
+        ANOS_ESTUDO = VD3005,
+        IDADE = V2009,
+        SEXO = V2007,
+        HORAS_TRABALHO = V4039
+    )%>%
+  
+  #transformando anos de estudo em numérico
+  mutate(
+    ANOS_ESTUDO = as.numeric(ANOS_ESTUDO), # convertendo ANOS_ESTUDO para numérico
+    ANOS_ESTUDO = (ANOS_ESTUDO -1),# subtraindo 1 para ajustar a escala
+  )%>%
+  
+  #removendo NA e transformando a horas de estudo semanal em mensal
+  drop_na(HORAS_TRABALHO)%>% # Retirando valores faltantes de HORAS_TRABALHO
+  mutate(
+    HORAS_TRABALHO = as.numeric(HORAS_TRABALHO), # convertendo HORAS_TRABALHO para numérico
+    HORAS_TRABALHO = HORAS_TRABALHO*4 # multiplicando por 4 para obter o total mensal
+    )%>%
+    filter(OCUPADO == "Sim")%>% # Filtrando apenas os ocupados
+  
+  #Criando binárias de região
+  mutate(
+     NORDESTE = ifelse(UF %in% c("Maranhão", "Piauí", "Ceará", "Rio Grande do Norte", "Paraíba", "Pernambuco", "Alagoas", "Sergipe", "Bahia"), 1, 0),
+      NORTE = ifelse(UF %in% c("Rondônia", "Acre", "Amazonas", "Roraima", "Pará", "Amapá", "Tocantins"), 1, 0),
+      SUDESTE = ifelse(UF %in% c("Minas Gerais", "Espírito Santo", "Rio de Janeiro", "São Paulo"), 1, 0),
+      SUL = ifelse(UF %in% c("Paraná", "Santa Catarina", "Rio Grande do Sul"), 1, 0),
+      CENTRO_OESTE = ifelse(UF %in% c("Mato Grosso do Sul", "Mato Grosso", "Goiás", "Distrito Federal"), 1, 0))%>%
+
+    #Criando outras binárias
+  mutate(
+  CLT = ifelse(CLT == "Sim", 1, 0), # Convertendo CLT para numérico
+  MULHER = ifelse(SEXO == "Mulher", 1, 0), # Convertendo Mulher para numérico
+  NAO_BRANCO = ifelse(V2010 != "Branca", 1, 0), # Convertendo Não Branco para numérico
+  
+  # Proxy da experiência: no Brasil normalmente as crinaças iniciam sua alfabetização aos 6 anos. Nesse caso, para construtir proxy da experiência, temos:
+  EXPER = IDADE - ANOS_ESTUDO - 6,
+  EXPER = if_else(EXPER < 0, 0, EXPER) # Garantindo que a experiência não seja negativa
+  ) %>%
+  
+  # Filtrando apenas os indivíduos com idade entre 18 e 60 anos
+   filter(
+    IDADE >=18 & IDADE <= 60 # Filtrando apenas indivíduos com idade entre 18 e 60 anos
+  )%>%
+  drop_na(CLT)
+```
+
+## Propensity Score Matching (PSM)
+
+### Selecionando as variaveis de interesse
+
+```{r}
+psm_clt = pnadc2024c %>%
+  select(UF, NORDESTE, NORTE, SUDESTE, SUL, CENTRO_OESTE, CLT, RPM, FAIXA_SM, HORAS_TRABALHO, IDADE, EXPER, ANOS_ESTUDO, MULHER, NAO_BRANCO, OCUPADO)
+
+psm_clt = as.data.frame(psm_clt) # Convertendo para data.table para melhor performance
+```
+
+### Estatísticas descritivas
+
+```{r, results='markup', warning=FALSE, message=FALSE}
+stargazer(psm_clt, 
+          type = "text",
+          title = "Estatísticas Descritivas")
+```
+A tabela acima apresenta as estatísticas descritivas das variáveis selecionadas para a análise. As variáveis incluem informações sobre a região geográfica, se o trabalhador possui carteira assinada (CLT), renda mensal (RPM), horas de trabalho, idade, anos de estudo, gênero e raça.
+
+
+### 1 - Teste de  balanceamento (filtrando apenas as variáveis do modelo) antes do PSM
+
+```{r, results='markup', warning=FALSE, message=FALSE}
+df_balance_antes = psm_clt %>%
+  select(NORDESTE, NORTE, SUDESTE, SUL, CENTRO_OESTE, CLT, RPM, HORAS_TRABALHO, IDADE, ANOS_ESTUDO, MULHER, NAO_BRANCO) 
+
+
+teste_bal_antes = balance_table(df_balance_antes, "CLT")
+
+teste_bal_antes = teste_bal_antes%>%
+  mutate(
+      p_value1 = round(p_value1, 7)
+  )
+
+teste_bal_antes
+print(teste_bal_antes, row.names = FALSE)
+#exporta para latex
+#print.xtable(xtable(teste_bal_antes, longtable = TRUE))
+```
+
+O teste de balanceamento antes do PSM mostra que existem diferenças estatisticamente significativas entre os grupos de trabalhadores com e sem carteira assinada (CLT) em relação às variáveis observáveis. As médias salariais (RPM), horas de trabalho, idade, anos de estudo, gênero e raça apresentam diferenças significativas entre os grupos. Portanto, é necessário aplicar o Propensity Score Matching (PSM) para ajustar as diferenças entre os grupos e tornar a comparação mais justa.
+
+### 2 - Estimando o Propensity Score
+
+Para estimar o escore de propensão, é necessário realizar uma regressão logística (logit) onde a variável dependente é o tratamento (CLT) e as variáveis independentes são as covariáveis selecionadas. O escore de propensão é a probabilidade de um indivíduo receber o tratamento (ter carteira assinada) dado suas características observáveis.
+
+* Primeiro estágio (Logit)
+
+```{r, results='markup', warning=FALSE, message=FALSE}
+pscore_fs = glm(CLT ~ HORAS_TRABALHO + IDADE + ANOS_ESTUDO + MULHER + NAO_BRANCO + NORDESTE + NORTE + SUL + CENTRO_OESTE, family = binomial(link = logit), data= psm_clt)
+
+
+summary(pscore_fs)
+
+```
+O modelo de regressão logística (logit) foi estimado para prever a probabilidade de um trabalhador ter carteira assinada (CLT) com base em suas características observáveis. As variáveis independentes incluem horas de trabalho, idade, anos de estudo, gênero, raça e região geográfica. O modelo fornece os coeficientes estimados para cada variável, que indicam a relação entre essas características e a probabilidade de ter carteira assinada.
+
+### 3 - Propensity Score Matching (PSM)
+
+O pacote MatchIt pode ser utilizado para parear os trabalhadores tratados e não tratados. Não seria necessário estimar o primeiro estágio previamente, já que o próprio MatchIt faz isso. A biblioteca também permite utilizar a opção "discard", que exclui observações fora do suporte comum.
+
+
+Para parear os grupos de tratamento e controle, é necessário primeiramente definir os
+critérios que serão utilizados. Utilizaremos o pareamento por escore de propensão e compararemos
+os resultados utilizando três critérios diferentes:
+
+
+* (i) vizinho mais próximo, em que cada trabalhador tratado (com carteira assinada) é pareado à um não tratado com o escore de propensão mais próximo ao seu;
+
+* (ii) vizinho mais próximo com caliper de 0,05, em que os pares formados anteriormente são limitados à distância de 0,05 entre os seus escores de propensão; 
+
+* (iii) vizinho mais próximo com caliper de 0,005, em que limitamos ainda mais a distância permitida para formar um par. Em todos os casos, excluiremos da análise as escolas fora do suporte comum do escore de propensão, em busca de respeitar a hipótese 2 do método de pareamento. 
+
+
+**Modelo 1: Pareamento por vizinho mais próximo**
+
+```{r, results='markup', warning=FALSE, message=FALSE}
+psm1 = matchit(CLT ~ HORAS_TRABALHO + IDADE + ANOS_ESTUDO + MULHER + NAO_BRANCO + NORDESTE + NORTE + SUL + CENTRO_OESTE, data = psm_clt, method = "nearest", ratio = 1, discard = "both")
+
+#summary(psm1)
+plot(psm1, type = "hist") #histrograma dos escores de propensão antes e após
+
+
+#Love plot (gráfico de balanço das covariáveis)
+love.plot(psm1, stats = "mean.diffs", threshold = 0.1) #Mostra a diferença média padronizada entre os grupos tratado e controle antes e depois do pareamento.
+
+df_matched1 = match.data(psm1) # Extraindo os dados pareados
+```
+O gráfico acima mostra o histograma dos escores de propensão antes e após o pareamento. O Love plot exibe o balanço das covariáveis, indicando a diferença média padronizada entre os grupos tratado e controle antes e depois do pareamento. Os resultados mostram que não houve um bom pareamento a partir do primeiro modelo, pois as covariáveis não estão balanceadas entre os grupos tratado e controle. Isso indica que o método de pareamento por vizinho mais próximo sem caliper não foi suficiente para controlar as diferenças entre os grupos.
+
+
+ **Modelo 2: Pareamento por vizinho mais próximo limitado ao caliper de 0.25**
+
+```{r, results='markup', warning=FALSE, message=FALSE}
+
+psm2 = matchit(CLT ~ HORAS_TRABALHO + IDADE + ANOS_ESTUDO + MULHER + NAO_BRANCO + NORDESTE + NORTE + SUL + CENTRO_OESTE, data = psm_clt, method = "nearest", ratio = 1, caliper = 0.25, discard = "both")
+
+
+#summary(psm1)
+plot(psm2, type = "hist") #histrograma dos escores de propensão antes e após
+
+
+#Love plot (gráfico de balanço das covariáveis)
+love.plot(psm2, stats = "mean.diffs", threshold = 0.1) #Mostra a diferença média padronizada entre os grupos tratado e controle antes e depois do pareamento.
+
+df_matched2 = match.data(psm2) # Extraindo os dados pareados
+```
+O gráfico acima mostra o histograma dos escores de propensão antes e após o pareamento. O Love plot exibe o balanço das covariáveis, indicando a diferença média padronizada entre os grupos tratado e controle antes e depois do pareamento. Os resultados mostram que o segundo modelo (caliper de 0.25) melhorou o balanceamento das covariáveis, mas ainda não foi suficiente para garantir um bom pareamento, pois algumas covariáveis ainda apresentam diferenças significativas entre os grupos tratado e controle.
+ 
+ 
+ **Modelo 3: Pareamento por vizinho mais próximo limitado ao caliper de 0.005**
+
+```{r, results='markup', warning=FALSE, message=FALSE}
+
+psm3 = matchit(CLT ~ HORAS_TRABALHO + IDADE + ANOS_ESTUDO + MULHER + NAO_BRANCO + NORDESTE + NORTE + SUL + CENTRO_OESTE, data = psm_clt, method = "nearest", ratio = 1, caliper = 0.005, discard = "both", )
+
+
+#summary(psm1)
+plot(psm3, type = "hist") #histrograma dos escores de propensão antes e após
+
+
+#Love plot (gráfico de balanço das covariáveis)
+love.plot(psm3, stats = "mean.diffs", threshold = 0.1) #Mostra a diferença média padronizada entre os grupos tratado e controle antes e depois do pareamento.
+
+df_matched3 = match.data(psm3) # Extraindo os dados pareados
+
+```
+O gráfico acima mostra o histograma dos escores de propensão antes e após o pareamento. O Love plot exibe o balanço das covariáveis, indicando a diferença média padronizada entre os grupos tratado e controle antes e depois do pareamento. Os resultados mostram que o terceiro modelo (caliper de 0.005) melhorou significativamente o balanceamento das covariáveis, tornando os grupos tratado e controle mais comparáveis. No entanto, ainda é importante verificar se as diferenças entre os grupos são estatisticamente significativas.
+
+
+### 4 - Testes de balanceamento após o pareamento
+
+```{r, warning=FALSE, message=FALSE}
+df_balance1 = df_matched1 %>%
+    select(NORDESTE, NORTE, SUDESTE, SUL, CENTRO_OESTE, CLT, RPM, HORAS_TRABALHO, IDADE, ANOS_ESTUDO, MULHER, NAO_BRANCO)
+```
+
+```{r, warning=FALSE, message=FALSE}
+df_balance2 = df_matched2 %>%
+  select(NORDESTE, NORTE, SUDESTE, SUL, CENTRO_OESTE, CLT, RPM, HORAS_TRABALHO, IDADE, ANOS_ESTUDO, MULHER, NAO_BRANCO)
+```
+
+```{r, warning=FALSE, message=FALSE}
+df_balance3 = df_matched3 %>%
+  select(NORDESTE, NORTE, SUDESTE, SUL, CENTRO_OESTE, CLT, RPM, HORAS_TRABALHO, IDADE, ANOS_ESTUDO, MULHER, NAO_BRANCO)
+```
+
+
+Gera a tabela com médias dos grupos de trabalhadores tratados (CLT) e não tratados após o pareamento
+
+```{r, warning=FALSE, message=FALSE}
+teste_bal1 = balance_table(df_balance1, "CLT")
+teste_bal1 = teste_bal1%>%
+  mutate(
+      p_value1 = round(p_value1, 7)
+  )
+teste_bal1
+
+
+
+teste_bal2 = balance_table(df_balance2, "CLT")
+teste_bal2 = teste_bal2%>%
+  mutate(
+      p_value1 = round(p_value1, 7)
+  )
+teste_bal2
+
+
+teste_bal3 = balance_table(df_balance3, "CLT")
+teste_bal3 = teste_bal3%>%
+  mutate(
+      p_value1 = round(p_value1, 7)
+  )
+teste_bal3
+```
+
+Após o pareamento pelos 3 métodos, o teste de balanceamento aponta que não houve um bom balanceamento das covariáveis entre os grupos tratados e não tratados. As diferenças entre as médias das variáveis observáveis ainda são estatisticamente significativas, indicando que o pareamento não conseguiu controlar completamente as diferenças entre os grupos. Isso sugere que o método de pareamento utilizado pode não ser adequado para este conjunto de dados ou que as covariáveis selecionadas não são suficientes para controlar as diferenças entre os grupos.
+
+```{r}
+#print.xtable(xtable(head(teste_bal1)))
+#print.xtable(xtable(head(teste_bal2)))
+#print.xtable(xtable(head(teste_bal3)))
+```
+
+### 5 - Regressão
+
+Ao invés de realizar um simples teste de médias, utiliza-se a regressão para estimar o impacto.
+
+Utilizando as bases de dados pareados, podemos estimar a mesma regressão linear sob os diferentes critérios:
+
+
+* Modelo0: regressão com a base original (sem pareamento)
+* Modelo1: regressão com a base pareada pelo vizinho mais próximo sem caliper
+* Modelo2: regressão com a base pareada pelo vizinho mais próximo com caliper de 0.25
+* Modelo3: regressão com a base pareada pelo vizinho mais próximo com caliper de 0.005
+
+
+```{r, results='markup', warning=FALSE, message=FALSE}
+reg0 = lm( RPM ~ CLT + HORAS_TRABALHO + IDADE + I(IDADE^2) + ANOS_ESTUDO + MULHER + NAO_BRANCO + NORDESTE + NORTE + SUL + CENTRO_OESTE, data = psm_clt)
+
+reg1 = lm( RPM ~ CLT + HORAS_TRABALHO + IDADE + I(IDADE^2)  + ANOS_ESTUDO + MULHER + NAO_BRANCO + NORDESTE + NORTE + SUL + CENTRO_OESTE, data = df_matched1)
+
+reg2 = lm( RPM ~ CLT + HORAS_TRABALHO + IDADE + I(IDADE^2) + ANOS_ESTUDO + MULHER + NAO_BRANCO + NORDESTE + NORTE + SUL + CENTRO_OESTE, data = df_matched2)
+
+reg3 = lm( RPM ~ CLT + HORAS_TRABALHO + IDADE + I(IDADE^2) + ANOS_ESTUDO + MULHER + NAO_BRANCO + NORDESTE + NORTE + SUL + CENTRO_OESTE, data = df_matched3)
+
+
+#exportar os resultados 
+
+suppressWarnings({
+stargazer(reg0, reg1, reg2, reg3,
+          type = "text",
+          title = "Resultados das Regressões",
+          dep.var.labels = "Renda Pessoal Mensal (RPM)",
+          omit.stat = c("f", "ser"),
+          no.space = TRUE,
+          add.lines = list(c("Observações", nrow(psm_clt), nrow(df_matched1), nrow(df_matched2), nrow(df_matched3))))
+})
+```
+Os resultados das regressões mostram o impacto da formalidade (CLT) sobre a renda pessoal mensal (RPM) dos trabalhadores. As variáveis de controle incluem horas de trabalho, idade, anos de estudo, gênero, raça e região geográfica. Os coeficientes estimados indicam a relação entre essas variáveis e a renda mensal.
+O efeito do tratamento (CLT) é positivo e significativo em todos os modelos. Isso indica que trabalhadores com carteira assinada tendem a ter uma renda mensal maior do que aqueles sem carteira assinada. No entanto, o tamanho do efeito varia entre os modelos, sugerindo que o método de pareamento utilizado pode influenciar as estimativas. Além disto, o pareamento não conseguiu balancear completamente as covariáveis entre os grupos tratados e não tratados, o que pode afetar a validade das estimativas. Desse modo, é necessário encontrar outro método de pareamento que consiga balancear as covariáveis entre os grupos tratados e não tratados, para melhorar a validade das estimativas.
+
+### Referências
+
+Castro, C. de S., Costa, G. W., Finamor, L. Avaliação de Impacto. Rio de Janeiro: FGV, 2024.
+
+Imbens, G. W. (2015). Matching methods in practice: Three examples. Journal of Human Resources, 50(2), 373-419.
+
+
